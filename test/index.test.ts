@@ -1,5 +1,29 @@
 import { describe, expect, test } from "bun:test";
-import { type BifrostConfig, fetchBifrostModels, normalizeBaseUrl, toModelConfig } from "../src/index.ts";
+import {
+	type BifrostConfig,
+	bearerKeyConfig,
+	fetchBifrostModels,
+	KEYLESS_PLACEHOLDER,
+	normalizeBaseUrl,
+	toModelConfig,
+} from "../src/index.ts";
+
+describe("bearerKeyConfig", () => {
+	const cfg: BifrostConfig = { baseUrl: "http://gw/v1", virtualKey: "sk-bf-from-file", source: "file" };
+	test("API key env var wins, passed by name", () => {
+		expect(bearerKeyConfig(cfg, { BIFROST_API_KEY: "k", BIFROST_VIRTUAL_KEY: "vk" })).toBe("BIFROST_API_KEY");
+	});
+	test("virtual key env var next, passed by name", () => {
+		expect(bearerKeyConfig(cfg, { BIFROST_VIRTUAL_KEY: "vk" })).toBe("BIFROST_VIRTUAL_KEY");
+	});
+	test("saved virtual key next", () => {
+		expect(bearerKeyConfig(cfg, {})).toBe("sk-bf-from-file");
+	});
+	test("placeholder only when there is nothing else", () => {
+		expect(bearerKeyConfig({ ...cfg, virtualKey: undefined }, {})).toBe(KEYLESS_PLACEHOLDER);
+		expect(bearerKeyConfig(undefined, {})).toBe(KEYLESS_PLACEHOLDER);
+	});
+});
 
 describe("normalizeBaseUrl", () => {
 	test.each([
@@ -98,6 +122,35 @@ describe("fetchBifrostModels", () => {
 		}) as unknown as typeof fetch;
 		await fetchBifrostModels(config, "bifrost-keyless", { fetch: fakeFetch });
 		expect(seen?.has("authorization")).toBe(false);
+	});
+
+	test("reports models left on default limits", async () => {
+		const fakeFetch = (async () =>
+			Response.json({
+				data: [{ id: "x/known", context_length: 32000 }, { id: "x/unknown-b" }, { id: "x/unknown-a" }],
+			})) as unknown as typeof fetch;
+		let reported: string[] = [];
+		await fetchBifrostModels(config, undefined, {
+			fetch: fakeFetch,
+			catalog: () => undefined,
+			onDefaultLimits: ids => {
+				reported = ids;
+			},
+		});
+		expect(reported).toEqual(["x/unknown-a", "x/unknown-b"]);
+	});
+
+	test("catalog hint suppresses the default-limits report", async () => {
+		const fakeFetch = (async () => Response.json({ data: [{ id: "x/m" }] })) as unknown as typeof fetch;
+		let called = false;
+		await fetchBifrostModels(config, undefined, {
+			fetch: fakeFetch,
+			catalog: () => ({ contextWindow: 200_000 }),
+			onDefaultLimits: () => {
+				called = true;
+			},
+		});
+		expect(called).toBe(false);
 	});
 
 	test("surfaces Bifrost error messages", async () => {

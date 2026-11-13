@@ -115,6 +115,20 @@ function realKey(apiKey: string | undefined): string | undefined {
 	return key && key !== KEYLESS_PLACEHOLDER ? key : undefined;
 }
 
+/**
+ * What to hand omp as the provider `apiKey`. omp always sends `Authorization: Bearer <key>` and
+ * an extension cannot suppress it, so pick the most meaningful bearer available:
+ *   1. BIFROST_API_KEY            (env-var name; omp resolves it per request)
+ *   2. the virtual key            (Bifrost accepts a VK as the bearer as well as via x-bf-vk)
+ *   3. a keyless placeholder      (open gateways ignore it)
+ * With an `oauth` login registered this is only a fallback: a key saved by `/login bifrost` wins.
+ */
+export function bearerKeyConfig(config: BifrostConfig | undefined, env: NodeJS.ProcessEnv = process.env): string {
+	if (nonEmpty(env.BIFROST_API_KEY)) return "BIFROST_API_KEY";
+	if (nonEmpty(env.BIFROST_VIRTUAL_KEY)) return "BIFROST_VIRTUAL_KEY";
+	return config?.virtualKey ?? KEYLESS_PLACEHOLDER;
+}
+
 function requestHeaders(config: BifrostConfig, apiKey: string | undefined): Record<string, string> {
 	const headers: Record<string, string> = { Accept: "application/json" };
 	const key = realKey(apiKey);
@@ -203,19 +217,20 @@ export function toModelConfig(
 	model: BifrostModel,
 	baseUrl: string,
 	catalog?: CatalogLookup,
+	onDefaultLimits?: (id: string) => void,
 ): ProviderModelConfig | undefined {
 	const id = nonEmpty(model.id);
 	if (!id || !isChatModel(model)) return undefined;
 	const hint = catalog?.(id);
 
-	const contextWindow =
+	const knownContext =
 		positiveInt(
 			model.context_length,
 			model.top_provider?.context_length,
 			model.max_input_tokens && model.max_output_tokens ? model.max_input_tokens + model.max_output_tokens : undefined,
-		) ??
-		hint?.contextWindow ??
-		DEFAULT_CONTEXT_WINDOW;
+		) ?? hint?.contextWindow;
+	if (knownContext === undefined) onDefaultLimits?.(id);
+	const contextWindow = knownContext ?? DEFAULT_CONTEXT_WINDOW;
 	const maxTokens = Math.min(
 		contextWindow,
 		positiveInt(model.max_output_tokens, model.top_provider?.max_completion_tokens, model.per_request_limits?.completion_tokens) ??
@@ -286,7 +301,13 @@ function errorDetail(body: unknown): string | undefined {
 export async function fetchBifrostModels(
 	config: BifrostConfig,
 	apiKey: string | undefined,
-	options: { fetch?: typeof fetch; catalog?: CatalogLookup; signal?: AbortSignal } = {},
+	options: {
+		fetch?: typeof fetch;
+		catalog?: CatalogLookup;
+		signal?: AbortSignal;
+		/** Called with the ids that fell back to the default context window. */
+		onDefaultLimits?: (ids: string[]) => void;
+	} = {},
 ): Promise<ProviderModelConfig[]> {
 	const doFetch = options.fetch ?? fetch;
 	const signal = options.signal ?? AbortSignal.timeout(DISCOVERY_TIMEOUT_MS);
@@ -305,10 +326,12 @@ export async function fetchBifrostModels(
 	if (!Array.isArray(data)) throw new Error("Bifrost /models returned an unexpected shape (expected { data: [] })");
 
 	const byId = new Map<string, ProviderModelConfig>();
+	const defaulted = new Set<string>();
 	for (const entry of data as BifrostModel[]) {
-		const model = toModelConfig(entry, config.baseUrl, options.catalog);
+		const model = toModelConfig(entry, config.baseUrl, options.catalog, id => defaulted.add(id));
 		if (model && !byId.has(model.id)) byId.set(model.id, model);
 	}
+	if (defaulted.size > 0) options.onDefaultLimits?.([...defaulted].sort());
 	return [...byId.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
@@ -400,13 +423,43 @@ export default async function bifrostExtension(pi: ExtensionAPI): Promise<void> 
 	let lastModels: ProviderModelConfig[] = [];
 	let lastStatus = "not yet discovered";
 
+	// Notices wait for the UI: writing to the terminal while omp's TUI owns it would garble
+	// the prompt. Discovery can run before session_start, so queue until then.
+	let ui: ExtensionContext["ui"] | undefined;
+	const queued: Array<[string, "info" | "warning" | "error"]> = [];
+	const notify = (message: string, level: "info" | "warning" | "error" = "info") => {
+		if (ui) ui.notify(message, level);
+		else if (!process.stdout.isTTY) process.stderr.write(`omp-bifrost-provider: ${message}\n`);
+		else queued.push([message, level]);
+	};
+	pi.on("session_start", (_event, ctx) => {
+		ui = ctx.ui;
+		for (const [message, level] of queued.splice(0)) ctx.ui.notify(message, level);
+	});
+
+	const announced = new Set<string>();
+	const warnDefaultLimits = (ids: string[]) => {
+		const fresh = ids.filter(id => !announced.has(id));
+		if (fresh.length === 0) return;
+		for (const id of fresh) announced.add(id);
+		const preview = fresh.slice(0, 5).join(", ") + (fresh.length > 5 ? `, +${fresh.length - 5} more` : "");
+		notify(
+			`Bifrost: no context size known for ${fresh.length} model(s) (${preview}); assuming ${DEFAULT_CONTEXT_WINDOW / 1000}k. ` +
+				"Pin real values with providers.bifrost.modelOverrides in ~/.omp/agent/models.yml.",
+			"warning",
+		);
+	};
+
 	const discover = async (apiKey: string | undefined): Promise<readonly ProviderModelConfig[]> => {
 		const config = await resolveConfig();
 		if (!config) {
 			lastStatus = "no Bifrost URL configured";
 			return [];
 		}
-		const models = await fetchBifrostModels(config, apiKey ?? process.env.BIFROST_API_KEY, { catalog });
+		const models = await fetchBifrostModels(config, apiKey ?? process.env.BIFROST_API_KEY, {
+			catalog,
+			onDefaultLimits: warnDefaultLimits,
+		});
 		lastModels = models;
 		lastStatus = `${models.length} models discovered at ${new Date().toLocaleTimeString()}`;
 		return models;
@@ -416,9 +469,7 @@ export default async function bifrostExtension(pi: ExtensionAPI): Promise<void> 
 		const config = await resolveConfig();
 		return {
 			api: API,
-			// An env-var *name* is resolved by omp at request time, so the key never sits in config.
-			// Otherwise the placeholder is a fallback: a key saved by `/login bifrost` wins.
-			apiKey: nonEmpty(process.env.BIFROST_API_KEY) ? "BIFROST_API_KEY" : KEYLESS_PLACEHOLDER,
+			apiKey: bearerKeyConfig(config),
 			...(config ? { baseUrl: config.baseUrl } : {}),
 			...(config?.virtualKey ? { headers: { "x-bf-vk": config.virtualKey } } : {}),
 			...(models?.length ? { models } : {}),
@@ -442,13 +493,18 @@ export default async function bifrostExtension(pi: ExtensionAPI): Promise<void> 
 					);
 					callbacks.onProgress?.("Checking Bifrost and discovering models...");
 					const probe: BifrostConfig = { baseUrl: url, virtualKey, source: "file" };
-					const models = await fetchBifrostModels(probe, apiKey, { catalog, signal: callbacks.signal });
+					const models = await fetchBifrostModels(probe, apiKey, {
+						catalog,
+						signal: callbacks.signal,
+						onDefaultLimits: warnDefaultLimits,
+					});
 					await writeStoredConfig({ url, ...(virtualKey ? { virtualKey } : {}) });
 					lastModels = models;
 					lastStatus = `${models.length} models discovered at login`;
 					pi.registerProvider(PROVIDER_ID, await providerConfig(models));
 					callbacks.onProgress?.(`Found ${models.length} Bifrost models.`);
-					return apiKey ?? KEYLESS_PLACEHOLDER;
+					// With no API key, the virtual key doubles as the bearer (Bifrost accepts both).
+					return apiKey ?? virtualKey ?? KEYLESS_PLACEHOLDER;
 				},
 			},
 		};
@@ -483,7 +539,14 @@ export default async function bifrostExtension(pi: ExtensionAPI): Promise<void> 
 			if (sub === "status") {
 				const config = await resolveConfig();
 				const envKey = nonEmpty(process.env.BIFROST_API_KEY);
-				const keyDesc = envKey ? "BIFROST_API_KEY (env)" : (await savedKey(ctx)) ? "saved by /login" : "none (keyless)";
+				const saved = await savedKey(ctx);
+				const keyDesc = envKey
+					? "BIFROST_API_KEY (env)"
+					: saved && saved !== config?.virtualKey
+						? "saved by /login"
+						: config?.virtualKey
+							? "none (virtual key is sent as the bearer)"
+							: "none (keyless)";
 				ctx.ui.notify(
 					[
 						`Bifrost URL: ${config ? `${config.baseUrl} (${config.source === "env" ? "BIFROST_URL" : configFilePath()})` : "not configured — run /login bifrost or set BIFROST_URL"}`,

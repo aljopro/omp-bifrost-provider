@@ -2,7 +2,8 @@
 const port = Number(process.env.MOCK_PORT ?? 18081);
 const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
 
-const models = ["gpt-4o", "gpt-4o-mini", "o4-mini"].map(id => ({ id, object: "model", created: 1700000000, owned_by: "openai" }));
+// "acme-mystery-1" is unknown to Bifrost and omp's catalog: it exercises the default-limits warning.
+const models = ["gpt-4o", "gpt-4o-mini", "o4-mini", "acme-mystery-1"].map(id => ({ id, object: "model", created: 1700000000, owned_by: "openai" }));
 
 Bun.serve({
 	port,

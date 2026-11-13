@@ -58,10 +58,12 @@ Discovery hits `{base}/models`; inference hits `{base}/chat/completions`.
 
 ### Auth combinations
 
-- **Virtual key only** — the common Bifrost setup (Bifrost requires one by default once governance has keys).
+omp always sends an `Authorization: Bearer` header and extensions can't remove it, so the provider picks the most meaningful bearer it has:
+
+- **Virtual key only** — the common Bifrost setup, and all you need unless your admins added a separate auth layer. The virtual key is sent both as `x-bf-vk` and as the bearer (Bifrost accepts either), so nothing fake ever reaches the gateway.
 - **API key only** — Bearer auth.
-- **Both** — Bearer plus `x-bf-vk`.
-- **Neither** — keyless gateway. omp needs *some* key to send a request, so a placeholder bearer (`bifrost-keyless`) is sent; Bifrost ignores it unless you've enabled direct provider keys (`allow_direct_keys`), in which case set a real key or virtual key.
+- **Both** — API key as the bearer, plus `x-bf-vk`.
+- **Neither** — keyless gateway. A placeholder bearer (`bifrost-keyless`) is sent, which open gateways ignore. If yours has direct provider keys enabled (`allow_direct_keys`), configure a virtual key instead.
 
 ## Commands
 
@@ -70,7 +72,7 @@ Discovery hits `{base}/models`; inference hits `{base}/chat/completions`.
 
 ## Model metadata
 
-Bifrost's `/v1/models` often includes context length, output limit, pricing (USD/token, converted to USD/million) and reasoning efforts. Whatever it reports wins. When it omits something — common for OpenAI-compatible upstreams — the provider fills the gap from **omp's own bundled model catalog** (`@oh-my-pi/pi-catalog`), matching `anthropic/claude-…` against omp's `anthropic` entries, `gemini/…` against `google`, and so on, then falling back to OpenRouter's `vendor/model` ids. Anything still unknown gets 128k context / 16k output.
+Bifrost's `/v1/models` often includes context length, output limit, pricing (USD/token, converted to USD/million) and reasoning efforts. Whatever it reports wins. When it omits something — common for OpenAI-compatible upstreams — the provider fills the gap from **omp's own bundled model catalog** (`@oh-my-pi/pi-catalog`), matching `anthropic/claude-…` against omp's `anthropic` entries, `gemini/…` against `google`, and so on, then falling back to OpenRouter's `vendor/model` ids. Anything still unknown gets 128k context / 16k output, and omp shows a one-time warning naming those models so the guess isn't silent.
 
 Reasoning models get an omp `effort` thinking ladder from Bifrost's `supported_efforts` (or the catalog), which omp sends as `reasoning_effort` — Bifrost translates that for non-OpenAI upstreams.
 
