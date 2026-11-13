@@ -1,0 +1,44 @@
+{
+	"name": "omp-bifrost-provider",
+	"version": "0.1.0",
+	"description": "Use any model behind a Bifrost AI Gateway from oh-my-pi (omp), with automatic model discovery",
+	"type": "module",
+	"license": "MIT",
+	"keywords": [
+		"omp",
+		"oh-my-pi",
+		"omp-extension",
+		"bifrost",
+		"llm-gateway",
+		"provider"
+	],
+	"files": [
+		"src/index.ts",
+		"README.md",
+		"LICENSE"
+	],
+	"omp": {
+		"extensions": [
+			"./src/index.ts"
+		]
+	},
+	"scripts": {
+		"check": "tsc --noEmit",
+		"test": "bun test"
+	},
+	"peerDependencies": {
+		"@oh-my-pi/pi-coding-agent": ">=18.16.0"
+	},
+	"devDependencies": {
+		"@oh-my-pi/pi-catalog": "18.20.0",
+		"@oh-my-pi/pi-coding-agent": "18.20.0",
+		"@oh-my-pi/pi-utils": "18.20.0",
+		"@types/bun": "latest",
+		"typescript": "^5.9.0"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/aljopro/omp-bifrost-provider.git"
+	},
+	"homepage": "https://github.com/aljopro/omp-bifrost-provider#readme"
+}

@@ -1,0 +1,20 @@
+{
+  "client": { "drop_excess_requests": false, "enable_logging": true },
+  "providers": {
+    "openai": {
+      "network_config": { "base_url": "http://127.0.0.1:18081" },
+      "keys": [{ "name": "mock", "value": "mock-upstream-key", "models": ["*"], "weight": 1.0 }]
+    }
+  },
+  "governance": {
+    "virtual_keys": [
+      {
+        "id": "vk-test",
+        "name": "omp-test",
+        "value": "sk-bf-omp-test-0000000000000000",
+        "is_active": true,
+        "provider_configs": [{ "provider": "openai", "allowed_models": ["*"], "key_ids": ["*"], "weight": 1 }]
+      }
+    ]
+  }
+}

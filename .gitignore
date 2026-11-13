@@ -1,0 +1,4 @@
+node_modules/
+*.tgz
+test/fixture/app/*
+!test/fixture/app/config.json
