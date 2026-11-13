@@ -31,7 +31,7 @@ Run both `check` and `test` before committing.
   - `apiKey` is an env-var *name* or a literal. With `oauth` set, it is only a fallback: a key saved by `/login` wins.
   - `fetchDynamicModels(apiKey)` goes through omp's SQLite model cache (24 h TTL). Returning `models` alongside it keeps them as static fallbacks.
   - Calling `registerProvider` again replaces the registration. That is how `/login` and `/bifrost refresh` push new models immediately.
-- **Headers.** omp always sends `Authorization: Bearer <apiKey>`, and an extension cannot remove or null it. `before_provider_request` can rewrite only the body. Per-request headers (e.g. `x-bf-session-id`) would need a custom `streamSimple` wrapping the built-in transport. That is deliberately not done, because a custom `api` id loses openai-completions-specific handling elsewhere in omp.
+- **Headers.** With the built-in transport, omp always sends `Authorization: Bearer <apiKey>` and the provider config can't suppress it. `before_provider_request` can rewrite only the body. Both the bearer and per-request headers (e.g. `x-bf-session-id`) *can* be controlled from a custom `streamSimple` that calls `streamOpenAICompletions` from `@oh-my-pi/pi-ai/providers/register-builtins` and passes `apiKey: NO_AUTH_SENTINEL` (from `@oh-my-pi/pi-ai`) to drop the bearer. The unrelated npm `omp-bifrost-provider` does this. Not done here (yet), because it needs a custom `api` id and the model rows lose openai-completions-specific handling elsewhere in omp.
 - **Usage hook.** `usage: UsageProvider`. With `usesRequestKey: true`, omp probes with exactly the key inference sends. A `null` result means "no data" and triggers a `failureBackoffMs` cooldown, which is how unsupported gateways stay quiet.
 - **Notifications.** Use `ctx.ui.notify` only after `session_start`, and queue anything earlier. Writing to stdout or stderr while the TUI owns the terminal garbles it. In non-TTY (`-p`) runs, stderr is fine.
 - **Thinking.** Use `{ mode: "effort", efforts: [...] }`. Valid efforts are `minimal|low|medium|high|xhigh|max`; omp sends the effort as `reasoning_effort`.
@@ -80,9 +80,13 @@ Follow semver for `0.x`: patch for fixes, minor for user-visible features.
 2. `git tag -a vX.Y.Z -m "vX.Y.Z: <summary>"`, then `git push && git push origin vX.Y.Z`.
 3. `gh release create vX.Y.Z --title vX.Y.Z --notes-file <notes>`. Notes are written for users: what changed, how to upgrade, and a compare link.
 
-Users install with `omp install github:aljopro/omp-bifrost-provider[#vX.Y.Z]`; nothing is published to npm yet.
+Users install with `omp install github:aljopro/omp-bifrost-provider[#vX.Y.Z]`; nothing is published to npm yet. They update with `omp plugin upgrade @jensenchappell/omp-bifrost-provider`. `omp update --plugins` only upgrades **marketplace** plugins and silently skips git/npm installs (verified in omp 18.20, `cli/plugin-cli.ts` `handleUpgrade`).
 
-**Package name:** `@jensenchappell/omp-bifrost-provider`, scoped to the owner's npm account so a future npm publish needs no rename. Never rename it back to bare `omp-bifrost-provider`. That name belongs to an unrelated npm package (a separate omp port, publisher "mcnull"). omp tracks plugins by package name, so a matching bare name made `omp update --plugins` keep resolving npm's 0.1.0 instead of this repo.
+To test install/upgrade flows without touching the real `~/.omp`, run omp with `HOME` pointed at a fresh `mktemp -d` folder; the plugins dir follows `HOME`. Never `rm -rf "$HOME"` after reassigning it.
+
+**Package name:** `@jensenchappell/omp-bifrost-provider`, scoped to the owner's npm account so a future npm publish needs no rename. Never rename it back to bare `omp-bifrost-provider`. That name belongs to an unrelated npm package (a separate omp port, publisher "mcnull"). omp tracks plugins by package name, so a matching bare name made reinstalls and upgrades keep resolving npm's 0.1.0 instead of this repo.
+
+**Renaming the package is a breaking move for installed users.** `omp plugin upgrade` across a name change installs the new code but leaves the bun dependency key under the old name, while omp's plugin record takes the new one. After that, uninstall by either name and upgrade by the new name all fail. Tell users to `omp plugin uninstall <old>` *before* installing; recovery is `(cd ~/.omp/plugins && bun remove <old>)` and a reinstall. Both routes were verified in an isolated HOME for 0.2.0 → 0.2.1.
 
 ## Style
 

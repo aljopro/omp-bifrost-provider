@@ -10,16 +10,33 @@ Every model Bifrost exposes (`openai/gpt-4o`, `anthropic/claude-sonnet-5-5`, `ge
 omp install github:aljopro/omp-bifrost-provider
 ```
 
-Update with `omp update --plugins` (plain `omp update` only updates omp itself), then restart omp.
+To update, upgrade it by name, then restart omp:
 
-The package is named `@jensenchappell/omp-bifrost-provider`. It is **not** the unscoped `omp-bifrost-provider` on npm, which is an unrelated port by a different publisher. If you installed that one (`omp install omp-bifrost-provider`), switch with:
+```bash
+omp plugin upgrade @jensenchappell/omp-bifrost-provider
+```
+
+Neither `omp update` (omp itself) nor `omp update --plugins` (marketplace plugins only) touches GitHub-installed plugins.
+
+### Coming from `omp-bifrost-provider` (unscoped)
+
+Since 0.2.1 the package is named `@jensenchappell/omp-bifrost-provider`. The unscoped `omp-bifrost-provider` on npm is an **unrelated** port by a different publisher. Releases of this repo before 0.2.1 also used that bare name.
+
+If you have the bare name installed, from npm or from this repo, uninstall it first. **Don't** `omp plugin upgrade` across the rename; omp's records end up split between the two names.
 
 ```bash
 omp plugin uninstall omp-bifrost-provider
 omp install github:aljopro/omp-bifrost-provider
 ```
 
-Then run `/login bifrost` again, since the two store logins in different formats.
+If you already upgraded, so that `omp plugin list` shows the new name but uninstall says "not installed", clear the leftover entry and reinstall:
+
+```bash
+(cd ~/.omp/plugins && bun remove omp-bifrost-provider)
+omp install github:aljopro/omp-bifrost-provider
+```
+
+Coming from the npm port, run `/login bifrost` again afterwards; the two store logins in different formats.
 
 Or try it for one session from a checkout:
 
