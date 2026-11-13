@@ -70,6 +70,34 @@ omp always sends an `Authorization: Bearer` header and extensions can't remove i
 - `/bifrost status` — URL and where it came from, which key is in use, catalog state.
 - `/bifrost refresh` — re-fetch the model list now (otherwise omp caches it for 24 h).
 
+## Usage and limits
+
+If your virtual key has budgets or rate limits, they show up in omp's `/usage` (and `omp usage`) next to your other providers:
+
+```text
+Bifrost — 1 account
+  ● my-team-key
+      ● Monthly budget     ███████████░░░░░░░░░░░░░░░░░  $42.50 / $100.00 · 42.5% used · resets in 17d
+      ● Tokens (hourly)    ░░░░░░░░░░░░░░░░░░░░░░░░░░░░  600 / 200K tokens · 0.3% used · resets in 59m
+      ● Requests (hourly)  ███████████░░░░░░░░░░░░░░░░░  40 / 100 requests · 40.0% used · resets in 59m
+```
+
+The same numbers feed omp's usage-aware fallback (`retry.usageAwareFallback`), so omp can move to your fallback chain *before* a Bifrost limit is hit rather than after a failed request.
+
+This reads Bifrost's self-service quota endpoint, `GET /api/governance/virtual-keys/quota`, authenticated by the virtual key alone (no admin access). Bifrost saves counters about every 10 seconds, so the newest requests can lag.
+
+It stays silent — no errors, nothing shown — when:
+
+- there's no virtual key (an API key alone can't read quota),
+- the key has no budgets or rate limits,
+- the gateway is too old to have the endpoint, or a proxy only exposes `/v1` and not `/api` (404/401/403).
+
+omp then waits 10 minutes before asking again. To check what your gateway returns:
+
+```bash
+curl -s -H "x-bf-vk: $BIFROST_VIRTUAL_KEY" https://bifrost.example.com/api/governance/virtual-keys/quota
+```
+
 ## Model metadata
 
 Bifrost's `/v1/models` often includes context length, output limit, pricing (USD/token, converted to USD/million) and reasoning efforts. Whatever it reports wins. When it omits something — common for OpenAI-compatible upstreams — the provider fills the gap from **omp's own bundled model catalog** (`@oh-my-pi/pi-catalog`), matching `anthropic/claude-…` against omp's `anthropic` entries, `gemini/…` against `google`, and so on, then falling back to OpenRouter's `vendor/model` ids. Anything still unknown gets 128k context / 16k output, and omp shows a one-time warning naming those models so the guess isn't silent.
@@ -95,6 +123,7 @@ This is a port of the idea behind [pi-bifrost-provider](https://github.com/lxdla
 
 - Uses omp's `registerProvider` + `fetchDynamicModels`, so discovery goes through omp's SQLite model cache like built-in providers.
 - Fills missing limits from omp's bundled catalog instead of downloading models.dev.
+- Reports virtual-key budgets and rate limits to omp's `/usage` and usage-aware fallback (pi-bifrost-provider has no usage reporting).
 - Defaults to Bifrost's native `/v1` API rather than the `/openai/v1` integration route (both work).
 - Does **not** yet send `x-bf-session-id`: omp's extension API only lets an extension rewrite the request body, not per-request headers, without replacing omp's OpenAI transport. Bifrost logs still work; they just aren't grouped by omp session.
 
@@ -108,7 +137,7 @@ bun test        # unit tests
 
 ### Against a real gateway
 
-`test/fixture/run.sh` starts a mock OpenAI upstream on `:18081` and a real Bifrost (`npx @maximhq/bifrost`) on `:18080` routed to it, with a test virtual key. No provider API keys needed:
+`test/fixture/run.sh` starts a mock OpenAI upstream on `:18081` and a real Bifrost (`npx @maximhq/bifrost`) on `:18080` routed to it, with a test virtual key that has a $5 daily budget and hourly token/request limits. No provider API keys needed:
 
 ```bash
 ./test/fixture/run.sh
@@ -120,6 +149,8 @@ Then in another shell:
 BIFROST_TEST_URL=http://127.0.0.1:18080 BIFROST_TEST_VK=sk-bf-omp-test-0000000000000000 bun test
 BIFROST_URL=http://127.0.0.1:18080 BIFROST_VIRTUAL_KEY=sk-bf-omp-test-0000000000000000 \
   omp -e ./src/index.ts -p --model bifrost/openai/gpt-4o-mini "say ping"
+BIFROST_URL=http://127.0.0.1:18080 BIFROST_VIRTUAL_KEY=sk-bf-omp-test-0000000000000000 \
+  omp usage -e ./src/index.ts -p bifrost
 ```
 
 Bifrost's UI is at http://127.0.0.1:18080 while it runs — the request logs show traffic from omp.

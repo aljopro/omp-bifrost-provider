@@ -16,6 +16,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext, ProviderConfig, ProviderModelConfig } from "@oh-my-pi/pi-coding-agent";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
+import { createBifrostUsageProvider } from "./usage.ts";
 
 export const PROVIDER_ID = "bifrost";
 const API = "openai-completions" as const;
@@ -465,11 +466,15 @@ export default async function bifrostExtension(pi: ExtensionAPI): Promise<void> 
 		return models;
 	};
 
+	// Virtual-key budgets and rate limits for /usage and usage-aware fallback.
+	const usage = createBifrostUsageProvider(PROVIDER_ID, { resolve: resolveConfig });
+
 	const providerConfig = async (models?: ProviderModelConfig[]): Promise<ProviderConfig> => {
 		const config = await resolveConfig();
 		return {
 			api: API,
 			apiKey: bearerKeyConfig(config),
+			usage,
 			...(config ? { baseUrl: config.baseUrl } : {}),
 			...(config?.virtualKey ? { headers: { "x-bf-vk": config.virtualKey } } : {}),
 			...(models?.length ? { models } : {}),
