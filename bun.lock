@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "omp-bifrost-provider",
+      "name": "@jensenchappell/omp-bifrost-provider",
       "devDependencies": {
         "@oh-my-pi/pi-catalog": "18.20.0",
         "@oh-my-pi/pi-coding-agent": "18.20.0",

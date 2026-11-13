@@ -1,6 +1,6 @@
 {
-	"name": "omp-bifrost-provider",
-	"version": "0.2.0",
+	"name": "@jensenchappell/omp-bifrost-provider",
+	"version": "0.2.1",
 	"description": "Use any model behind a Bifrost AI Gateway from oh-my-pi (omp), with automatic model discovery",
 	"type": "module",
 	"license": "MIT",

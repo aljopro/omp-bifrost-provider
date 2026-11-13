@@ -10,13 +10,24 @@ Every model Bifrost exposes (`openai/gpt-4o`, `anthropic/claude-sonnet-5-5`, `ge
 omp install github:aljopro/omp-bifrost-provider
 ```
 
+Update with `omp update --plugins` (plain `omp update` only updates omp itself), then restart omp.
+
+The package is named `@jensenchappell/omp-bifrost-provider`. It is **not** the unscoped `omp-bifrost-provider` on npm, which is an unrelated port by a different publisher. If you installed that one (`omp install omp-bifrost-provider`), switch with:
+
+```bash
+omp plugin uninstall omp-bifrost-provider
+omp install github:aljopro/omp-bifrost-provider
+```
+
+Then run `/login bifrost` again, since the two store logins in different formats.
+
 Or try it for one session from a checkout:
 
 ```bash
 omp -e ./src/index.ts
 ```
 
-Extensions run with your user's permissions — read `src/index.ts` before installing (it's one file).
+Extensions run with your user's permissions. Read `src/` before installing; it's two files.
 
 ## Configure
 

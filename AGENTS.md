@@ -82,6 +82,8 @@ Follow semver for `0.x`: patch for fixes, minor for user-visible features.
 
 Users install with `omp install github:aljopro/omp-bifrost-provider[#vX.Y.Z]`; nothing is published to npm yet.
 
+**Package name:** `@jensenchappell/omp-bifrost-provider`, scoped to the owner's npm account so a future npm publish needs no rename. Never rename it back to bare `omp-bifrost-provider`. That name belongs to an unrelated npm package (a separate omp port, publisher "mcnull"). omp tracks plugins by package name, so a matching bare name made `omp update --plugins` keep resolving npm's 0.1.0 instead of this repo.
+
 ## Style
 
 - TypeScript, ESM, tabs, double quotes. Strict `tsc`. Explicit `.ts` import suffixes.
