@@ -91,6 +91,24 @@ describe("toModelConfig", () => {
 		expect(bare).toMatchObject({ contextWindow: 128_000, maxTokens: 16_384 });
 	});
 
+	test.each([
+		"anthropic/claude-sonnet-5-5",
+		"bedrock/us.anthropic.claude-haiku-5-5-v1:0",
+		"vertex/claude-opus-5-5",
+		"corp-claude/Claude-Sonnet",
+	])("Claude via any route gets Anthropic cache markers: %s", id => {
+		const compat = toModelConfig({ id }, base)?.compat as { cacheControlFormat?: string };
+		expect(compat.cacheControlFormat).toBe("anthropic");
+	});
+
+	test.each(["openai/gpt-4o", "gemini/gemini-3.8-flash", "mistral/mistral-large"])(
+		"non-Claude models get no cache markers: %s",
+		id => {
+			const compat = toModelConfig({ id }, base)?.compat as { cacheControlFormat?: string };
+			expect(compat.cacheControlFormat).toBeUndefined();
+		},
+	);
+
 	test("drops non-chat models", () => {
 		expect(toModelConfig({ id: "openai/text-embedding-3-small" }, base)).toBeUndefined();
 		expect(toModelConfig({ id: "openai/whisper-1" }, base)).toBeUndefined();

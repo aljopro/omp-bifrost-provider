@@ -18,6 +18,21 @@
           "weight": 1.0
         }
       ]
+    },
+    "anthropic": {
+      "network_config": {
+        "base_url": "http://127.0.0.1:18081/anthropic"
+      },
+      "keys": [
+        {
+          "name": "mock-anthropic",
+          "value": "mock-anthropic-key",
+          "models": [
+            "*"
+          ],
+          "weight": 1.0
+        }
+      ]
     }
   },
   "governance": {
@@ -30,6 +45,16 @@
         "provider_configs": [
           {
             "provider": "openai",
+            "allowed_models": [
+              "*"
+            ],
+            "key_ids": [
+              "*"
+            ],
+            "weight": 1
+          },
+          {
+            "provider": "anthropic",
             "allowed_models": [
               "*"
             ],

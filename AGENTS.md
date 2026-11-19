@@ -35,6 +35,9 @@ Run both `check` and `test` before committing.
 - **Usage hook.** `usage: UsageProvider`. With `usesRequestKey: true`, omp probes with exactly the key inference sends. A `null` result means "no data" and triggers a `failureBackoffMs` cooldown, which is how unsupported gateways stay quiet.
 - **Notifications.** Use `ctx.ui.notify` only after `session_start`, and queue anything earlier. Writing to stdout or stderr while the TUI owns the terminal garbles it. In non-TTY (`-p`) runs, stderr is fine.
 - **Thinking.** Use `{ mode: "effort", efforts: [...] }`. Valid efforts are `minimal|low|medium|high|xhigh|max`; omp sends the effort as `reasoning_effort`.
+- **Prompt caching.** Anthropic-style `cache_control` markers go out on the chat-completions path only when a model's `compat.cacheControlFormat` is `"anthropic"` (`maybeAddAnthropicCacheControl` in pi-ai `openai-completions.ts`: one ephemeral breakpoint on the last non-empty text part). omp's catalog sets it only for OpenRouter + Anthropic, so this provider must set it itself for Claude (`usesAnthropicCaching`). Without it, Claude via Bifrost never caches. That was the 0.2.2 bug: a real trial billed 28.9M input tokens with zero cache reuse.
+- **Model cache vs. code changes.** Discovered rows, including `compat`, are cached in SQLite for 24 h, and omp loads provider rows lazily, so `ctx.modelRegistry.getAll()` holds no `bifrost` rows at `session_start`. When `toModelConfig` output changes, bump `CATALOG_VERSION` in `src/index.ts`. The next session sees the stored version (`<agentDir>/bifrost-catalog.json`) is older and calls `refreshDiscoverableProviders(["bifrost"], "online")`. That session's already-chosen model keeps the old settings; the fix applies from the session after.
+- **Debugging requests.** A throwaway extension with `pi.on("before_provider_request", e => …e.payload…)` writing to stderr in `-p` mode shows the exact body omp sends. Keep it outside the repo.
 
 ## Bifrost facts (verified against a real gateway)
 
@@ -44,10 +47,11 @@ Run both `check` and `test` before committing.
 - `/v1/models` often includes `context_length`, `max_output_tokens`, `pricing` (USD **per token**, as strings) and `reasoning.supported_efforts`. It often omits them for OpenAI-compatible upstreams.
 - Quota: `GET {root}/api/governance/virtual-keys/quota`. This is self-service, authenticated by the VK alone, and returns `budgets[]` plus `rate_limits[]`. Counters are kept in memory and written to the database **every ~10 s**, and the endpoint reads the database. Wait at least 10 s after traffic before asserting on counts.
 - Source of truth for shapes: `core/schemas/models.go` (`Model`) and `transports/bifrost-http/handlers/governance.go` (`getVirtualKeyQuota`) in maximhq/bifrost.
+- Prompt caching passes through: an OpenAI-format content part's `cache_control` becomes an Anthropic block's `cache_control` (`core/providers/anthropic/chat.go`) or a Bedrock cache point (`core/providers/bedrock/chat.go`). Responses report `prompt_tokens_details.cached_tokens` (reads) and `cache_write_tokens` (writes), which omp parses and prices.
 
 ## Testing end to end
 
-`test/fixture/run.sh` starts `test/fixture/mock-openai.ts`, which serves 4 models (one deliberately unknown, `acme-mystery-1`), and a real Bifrost via `npx -y @maximhq/bifrost` using `test/fixture/app/config.json`. That config sets virtual key `sk-bf-omp-test-0000000000000000` with a $5/day budget and hourly token and request limits. No real provider keys are needed. No container runtime is required; the npm package runs the native binary.
+`test/fixture/run.sh` starts `test/fixture/mock-openai.ts`, which serves an OpenAI API at `/v1` (4 models, one deliberately unknown, `acme-mystery-1`) and an Anthropic Messages API at `/anthropic/v1` (`claude-sonnet-5-5`). The Anthropic mock logs `ANTHROPIC_CACHE_CONTROL present|absent` per request and simulates caching: the first marked request reports a cache write, later ones a cache read. `run.sh` also starts a real Bifrost via `npx -y @maximhq/bifrost` using `test/fixture/app/config.json`. That config routes `openai` and `anthropic` to the mocks and sets virtual key `sk-bf-omp-test-0000000000000000` with a $5/day budget and hourly token and request limits. No real provider keys are needed. No container runtime is required; the npm package runs the native binary.
 
 **Isolate omp from the user's real config** with a throwaway agent dir. Otherwise discovery and the model cache write into `~/.omp`:
 
@@ -70,6 +74,7 @@ Gotchas:
 - **Bearer choice** (`bearerKeyConfig`): `BIFROST_API_KEY` (env name), then `BIFROST_VIRTUAL_KEY` (env name), then the saved VK, then the `bifrost-keyless` placeholder. Never send the placeholder when a VK is available.
 - **Config precedence:** env vars override `<agentDir>/bifrost.json` (written by `/login`, mode 600, holds URL and VK only). The API key from `/login` lives in omp's credential store.
 - **Metadata precedence:** Bifrost-reported values, then omp's bundled catalog (`createCatalogLookup`, with provider aliases such as `gemini→google`), then the 128k/16k defaults with a one-time warning.
+- **Claude caching:** every model whose id matches `/claude/i` gets `cacheControlFormat: "anthropic"`; nothing else does. Changing what models get must bump `CATALOG_VERSION`.
 - **Usage never errors:** every failure path in `src/usage.ts` returns `null`. Keep it that way. A provider that can't read quota must look exactly like one with no limits.
 
 ## Releasing

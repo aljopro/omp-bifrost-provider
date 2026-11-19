@@ -99,6 +99,31 @@ async function writeStoredConfig(config: StoredConfig): Promise<void> {
 	await fs.writeFile(file, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
 }
 
+/**
+ * Version of the model mapping. Bump it whenever `toModelConfig` changes what it produces, so
+ * installs with a catalog cached by an older release re-discover on their next session.
+ *   2: Claude models get `cacheControlFormat: "anthropic"` (0.2.2)
+ */
+export const CATALOG_VERSION = 2;
+
+function catalogStatePath(): string {
+	return path.join(getAgentDir(), "bifrost-catalog.json");
+}
+
+async function readCatalogVersion(): Promise<number> {
+	try {
+		const { version } = JSON.parse(await fs.readFile(catalogStatePath(), "utf8")) as { version?: unknown };
+		return typeof version === "number" ? version : 0;
+	} catch {
+		return 0;
+	}
+}
+
+async function writeCatalogVersion(version: number): Promise<void> {
+	await fs.mkdir(path.dirname(catalogStatePath()), { recursive: true });
+	await fs.writeFile(catalogStatePath(), `${JSON.stringify({ version })}\n`);
+}
+
 export async function resolveConfig(env: NodeJS.ProcessEnv = process.env): Promise<BifrostConfig | undefined> {
 	const stored = await readStoredConfig();
 	const envUrl = nonEmpty(env.BIFROST_URL);
@@ -214,6 +239,15 @@ function efforts(list: readonly string[] | undefined): Effort[] | undefined {
 	return result.length ? result : undefined;
 }
 
+/**
+ * Claude, however Bifrost reaches it: `anthropic/claude-…`, `bedrock/…anthropic.claude-…`,
+ * `vertex/claude-…`, or a custom provider alias. Matching the model name (not the prefix)
+ * covers every route.
+ */
+export function usesAnthropicCaching(bifrostId: string): boolean {
+	return /claude/iu.test(bifrostId);
+}
+
 export function toModelConfig(
 	model: BifrostModel,
 	baseUrl: string,
@@ -277,6 +311,11 @@ export function toModelConfig(
 			supportsReasoningEffort: reasoning,
 			supportsUsageInStreaming: true,
 			maxTokensField: "max_completion_tokens",
+			// Claude only caches prompts that carry `cache_control` markers. omp adds them on the
+			// chat-completions path only with this flag, which its catalog sets for OpenRouter alone,
+			// so without it every Bifrost→Claude turn re-bills the full prompt. Bifrost forwards
+			// the markers to Anthropic, Bedrock and Vertex, and reports cache reads/writes back.
+			...(usesAnthropicCaching(id) ? { cacheControlFormat: "anthropic" } : {}),
 		} as ProviderModelConfig["compat"],
 	};
 	if (reasoning && effortList) {
@@ -433,10 +472,27 @@ export default async function bifrostExtension(pi: ExtensionAPI): Promise<void> 
 		else if (!process.stdout.isTTY) process.stderr.write(`omp-bifrost-provider: ${message}\n`);
 		else queued.push([message, level]);
 	};
-	pi.on("session_start", (_event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
 		ui = ctx.ui;
 		for (const [message, level] of queued.splice(0)) ctx.ui.notify(message, level);
+		await refreshIfCacheOutdated(ctx);
 	});
+
+	// omp serves discovered models from its SQLite cache for up to 24 h, so a catalog cached by an
+	// older release keeps its old model settings (e.g. ≤ 0.2.1 sent Claude without cache markers)
+	// until it expires. Bump CATALOG_VERSION whenever model mapping changes; the first session on a
+	// new version forces one live re-discovery. The registry can't be inspected instead: omp loads
+	// provider rows lazily, so they aren't there yet at session_start.
+	const refreshIfCacheOutdated = async (ctx: ExtensionContext) => {
+		try {
+			if ((await readCatalogVersion()) >= CATALOG_VERSION) return;
+			if (!(await resolveConfig())) return;
+			await ctx.modelRegistry.refreshDiscoverableProviders([PROVIDER_ID], "online");
+			await writeCatalogVersion(CATALOG_VERSION);
+		} catch {
+			// Best effort: an unreachable gateway keeps the cached catalog; we retry next session.
+		}
+	};
 
 	const announced = new Set<string>();
 	const warnDefaultLimits = (ids: string[]) => {

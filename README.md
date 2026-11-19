@@ -145,6 +145,16 @@ providers:
 
 Embedding, TTS, transcription, image and moderation models are filtered out.
 
+## Prompt caching (Claude)
+
+Claude only caches a prompt when the request marks it with `cache_control`. Every Bifrost model whose id contains `claude` (`anthropic/…`, `bedrock/…anthropic.claude…`, `vertex/claude…`) has omp add an Anthropic cache breakpoint on the last message of each request, so the cached prefix grows turn by turn through a tool loop. Bifrost forwards the marker to Anthropic, Bedrock or Vertex, and reports cache reads and writes back. omp then shows them and prices them at cache rates.
+
+In practice, the first turn pays a small premium to write the cache, and later turns read the repeated prefix (system prompt, tools, earlier messages and tool results) at roughly a tenth of the input price. The cache lasts about 5 minutes. A longer pause means the next turn writes it again.
+
+Before 0.2.2 these markers were never sent, so every Claude turn re-billed its whole prompt. After upgrading, **restart omp once**. The first session refreshes the cached model list, and caching applies from the session after that. To check, look for cache read tokens on the second turn in Bifrost's logs.
+
+Other models are untouched. OpenAI and Gemini cache automatically without markers.
+
 ## Differences from pi-bifrost-provider
 
 This is a port of the idea behind [pi-bifrost-provider](https://github.com/lxdlam/pi-bifrost-provider) to omp's extension API, not a fork:
