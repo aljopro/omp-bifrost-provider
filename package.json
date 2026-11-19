@@ -1,6 +1,6 @@
 {
 	"name": "@jensenchappell/omp-bifrost-provider",
-	"version": "0.2.2",
+	"version": "0.3.0",
 	"description": "Use any model behind a Bifrost AI Gateway from oh-my-pi (omp), with automatic model discovery",
 	"type": "module",
 	"license": "MIT",
@@ -30,9 +30,9 @@
 		"@oh-my-pi/pi-coding-agent": ">=18.16.0"
 	},
 	"devDependencies": {
-		"@oh-my-pi/pi-catalog": "18.20.0",
-		"@oh-my-pi/pi-coding-agent": "18.20.0",
-		"@oh-my-pi/pi-utils": "18.20.0",
+		"@oh-my-pi/pi-catalog": "19.0.0",
+		"@oh-my-pi/pi-coding-agent": "19.0.0",
+		"@oh-my-pi/pi-utils": "19.0.0",
 		"@types/bun": "latest",
 		"typescript": "^5.9.0"
 	},

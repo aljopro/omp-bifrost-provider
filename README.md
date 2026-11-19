@@ -69,6 +69,7 @@ The login checks the gateway by listing its models. The URL and virtual key are 
 | `BIFROST_URL` | yes* | Gateway URL, e.g. `http://localhost:8080`. |
 | `BIFROST_API_KEY` | no | Sent as `Authorization: Bearer …`. |
 | `BIFROST_VIRTUAL_KEY` | no | Governance virtual key, sent as `x-bf-vk`. |
+| `BIFROST_ANTHROPIC_ROUTE` | no | `auto` (default) or `off`. See [Claude via the Anthropic route](#claude-via-the-anthropic-route). Also settable as `"anthropicRoute": "off"` in `~/.omp/agent/bifrost.json`. |
 
 \* Either `BIFROST_URL` or a prior `/login bifrost`. Environment variables override the saved login.
 
@@ -95,8 +96,8 @@ omp always sends an `Authorization: Bearer` header and extensions can't remove i
 
 ## Commands
 
-- `/bifrost status` — URL and where it came from, which key is in use, catalog state.
-- `/bifrost refresh` — re-fetch the model list now (otherwise omp caches it for 24 h).
+- `/bifrost status` — URL and where it came from, which key is in use, catalog state, and how Claude is routed.
+- `/bifrost refresh` — re-fetch the model list now (otherwise omp caches it for 24 h). Re-select your model with `/model` afterwards so the current session picks up any changes.
 
 ## Usage and limits
 
@@ -145,13 +146,31 @@ providers:
 
 Embedding, TTS, transcription, image and moderation models are filtered out.
 
-## Prompt caching (Claude)
+## Claude via the Anthropic route
 
-Claude only caches a prompt when the request marks it with `cache_control`. Every Bifrost model whose id contains `claude` (`anthropic/…`, `bedrock/…anthropic.claude…`, `vertex/claude…`) has omp add an Anthropic cache breakpoint on the last message of each request, so the cached prefix grows turn by turn through a tool loop. Bifrost forwards the marker to Anthropic, Bedrock or Vertex, and reports cache reads and writes back. omp then shows them and prices them at cache rates.
+Bifrost also serves Anthropic's own Messages API at `{gateway}/anthropic/v1/messages`. During model discovery, the provider checks whether that route answers for your key (a model listing at `/anthropic/v1/models`). If it does, `anthropic/claude-*` models use **omp's native Anthropic transport** through it. Model ids don't change; you still pick `bifrost/anthropic/claude-sonnet-5-5`.
 
-In practice, the first turn pays a small premium to write the cache, and later turns read the repeated prefix (system prompt, tools, earlier messages and tool results) at roughly a tenth of the input price. The cache lasts about 5 minutes. A longer pause means the next turn writes it again.
+That gets you, compared with sending Claude through chat completions:
 
-Before 0.2.2 these markers were never sent, so every Claude turn re-billed its whole prompt. After upgrading, **restart omp once**. The first session refreshes the cached model list, and caching applies from the session after that. To check, look for cache read tokens on the second turn in Bifrost's logs.
+- **More cache breakpoints:** tools, system prompt and conversation are cached separately, so a change in one doesn't invalidate the others (for example after omp compacts a long session).
+- **Optional 1-hour cache:** set omp's `cacheRetention` to `long` (or `PI_CACHE_RETENTION=long`). Anthropic charges 2× instead of 1.25× to write it, but it survives pauses longer than 5 minutes. The default stays 5 minutes.
+- **Claude's native thinking** (adaptive effort) instead of a translated `reasoning_effort`.
+
+If the route isn't reachable (`404` when a proxy only forwards `/v1`, or `401`/`403`), Claude falls back to chat completions with cache markers (below). `/bifrost status` shows which path is in use and why. To force chat completions, set `BIFROST_ANTHROPIC_ROUTE=off` or `"anthropicRoute": "off"` in `~/.omp/agent/bifrost.json`.
+
+Only direct `anthropic/…` models use the route for now. Bedrock- and Vertex-routed Claude stay on chat completions.
+
+If you set up a `models.yml` provider pointing at `…/anthropic` by hand, you can remove it after upgrading to 0.3.0.
+
+## Prompt caching on chat completions (Claude)
+
+Claude only caches a prompt when the request marks it with `cache_control`. Claude models that go through chat completions, meaning Bedrock or Vertex Claude, or any Claude when the Anthropic route is off or unavailable, have omp add a cache breakpoint on the last message of each request, so the cached prefix grows turn by turn through a tool loop. Every model whose id contains `claude` gets this. Bifrost forwards the marker to Anthropic, Bedrock or Vertex, and reports cache reads and writes back; omp shows them and prices them at cache rates.
+
+In practice, the first turn pays a small premium to write the cache, and later turns read the repeated prefix (system prompt, tools, earlier messages and tool results) at roughly a tenth of the input price. The cache lasts about 5 minutes.
+
+Before 0.2.2 these markers were never sent, so every Claude turn re-billed its whole prompt.
+
+**After upgrading, restart omp twice.** omp keeps the model list cached for up to 24 hours. The first session on a new version refreshes it, and the new settings apply from the next session. To check, look for cache read tokens on the second turn in Bifrost's logs, or the Cache read line in a request's log detail.
 
 Other models are untouched. OpenAI and Gemini cache automatically without markers.
 
@@ -162,7 +181,7 @@ This is a port of the idea behind [pi-bifrost-provider](https://github.com/lxdla
 - Uses omp's `registerProvider` + `fetchDynamicModels`, so discovery goes through omp's SQLite model cache like built-in providers.
 - Fills missing limits from omp's bundled catalog instead of downloading models.dev.
 - Reports virtual-key budgets and rate limits to omp's `/usage` and usage-aware fallback (pi-bifrost-provider has no usage reporting).
-- Defaults to Bifrost's native `/v1` API rather than the `/openai/v1` integration route (both work).
+- Defaults to Bifrost's native `/v1` API rather than the `/openai/v1` integration route (both work), and sends `anthropic/claude-*` through Bifrost's Anthropic route with omp's native Anthropic transport when available.
 - Does **not** yet send `x-bf-session-id`: omp's extension API only lets an extension rewrite the request body, not per-request headers, without replacing omp's OpenAI transport. Bifrost logs still work; they just aren't grouped by omp session.
 
 ## Develop
@@ -175,7 +194,7 @@ bun test        # unit tests
 
 ### Against a real gateway
 
-`test/fixture/run.sh` starts a mock OpenAI upstream on `:18081` and a real Bifrost (`npx @maximhq/bifrost`) on `:18080` routed to it, with a test virtual key that has a $5 daily budget and hourly token/request limits. No provider API keys needed:
+`test/fixture/run.sh` starts a mock OpenAI upstream on `:18081` and a real Bifrost (`npx @maximhq/bifrost`) on `:18080` routed to it, plus a mock Anthropic Messages API that simulates prompt caching, with a test virtual key that has a $5 daily budget and hourly token/request limits. No provider API keys needed:
 
 ```bash
 ./test/fixture/run.sh

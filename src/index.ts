@@ -16,7 +16,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext, ProviderConfig, ProviderModelConfig } from "@oh-my-pi/pi-coding-agent";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
-import { createBifrostUsageProvider } from "./usage.ts";
+import { createBifrostUsageProvider, gatewayRoot } from "./usage.ts";
 
 export const PROVIDER_ID = "bifrost";
 const API = "openai-completions" as const;
@@ -40,11 +40,26 @@ export interface BifrostConfig {
 	virtualKey?: string;
 	/** Where `baseUrl` came from, for /bifrost status. */
 	source: "env" | "file";
+	/**
+	 * `auto` (default): send `anthropic/claude-*` through Bifrost's Anthropic route with omp's
+	 * native Anthropic transport when the gateway exposes it. `off`: always use chat completions.
+	 */
+	anthropicRoute?: AnthropicRouteSetting;
 }
+
+export type AnthropicRouteSetting = "auto" | "off";
 
 interface StoredConfig {
 	url?: string;
 	virtualKey?: string;
+	anthropicRoute?: AnthropicRouteSetting;
+}
+
+function routeSetting(value: unknown): AnthropicRouteSetting | undefined {
+	const v = nonEmpty(value)?.toLowerCase();
+	if (v === "off" || v === "false" || v === "0" || v === "disabled") return "off";
+	if (v === "auto" || v === "on" || v === "true" || v === "1") return "auto";
+	return undefined;
 }
 
 function nonEmpty(value: unknown): string | undefined {
@@ -103,8 +118,9 @@ async function writeStoredConfig(config: StoredConfig): Promise<void> {
  * Version of the model mapping. Bump it whenever `toModelConfig` changes what it produces, so
  * installs with a catalog cached by an older release re-discover on their next session.
  *   2: Claude models get `cacheControlFormat: "anthropic"` (0.2.2)
+ *   3: `anthropic/claude-*` use omp's native Anthropic transport via Bifrost's Anthropic route (0.3.0)
  */
-export const CATALOG_VERSION = 2;
+export const CATALOG_VERSION = 3;
 
 function catalogStatePath(): string {
 	return path.join(getAgentDir(), "bifrost-catalog.json");
@@ -133,6 +149,7 @@ export async function resolveConfig(env: NodeJS.ProcessEnv = process.env): Promi
 		baseUrl: normalizeBaseUrl(url),
 		virtualKey: nonEmpty(env.BIFROST_VIRTUAL_KEY) ?? nonEmpty(stored.virtualKey),
 		source: envUrl ? "env" : "file",
+		anthropicRoute: routeSetting(env.BIFROST_ANTHROPIC_ROUTE) ?? routeSetting(stored.anthropicRoute) ?? "auto",
 	};
 }
 
@@ -203,9 +220,19 @@ export interface CatalogHint {
 	reasoning?: boolean;
 	efforts?: Effort[];
 	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	/** The catalog's Anthropic-native thinking control (e.g. `anthropic-adaptive`), for native rows. */
+	nativeThinking?: { mode: string; efforts: Effort[] };
 }
 
 export type CatalogLookup = (bifrostId: string) => CatalogHint | undefined;
+
+/**
+ * Models eligible for Bifrost's Anthropic route. Only direct Anthropic for now: Bedrock- and
+ * Vertex-routed Claude stay on chat completions (with cache markers) until verified there.
+ */
+export function isNativeAnthropicId(bifrostId: string): boolean {
+	return /^anthropic\/claude/iu.test(bifrostId);
+}
 
 function positiveInt(...values: unknown[]): number | undefined {
 	for (const v of values) {
@@ -253,6 +280,8 @@ export function toModelConfig(
 	baseUrl: string,
 	catalog?: CatalogLookup,
 	onDefaultLimits?: (id: string) => void,
+	/** Bifrost's Anthropic route (`{root}/anthropic`) when the gateway exposes it. */
+	nativeAnthropicBaseUrl?: string,
 ): ProviderModelConfig | undefined {
 	const id = nonEmpty(model.id);
 	if (!id || !isChatModel(model)) return undefined;
@@ -325,7 +354,60 @@ export function toModelConfig(
 			...(defaultEffort ? { defaultLevel: defaultEffort } : {}),
 		} as ProviderModelConfig["thinking"];
 	}
+
+	// Native route: omp's own Anthropic transport places several cache breakpoints (tools, system,
+	// conversation), honors `cacheRetention: long` (1 h cache), and speaks Claude's thinking natively.
+	// Bifrost's `/anthropic/v1/messages` accepts the same `anthropic/…` id and strips the prefix.
+	if (nativeAnthropicBaseUrl && isNativeAnthropicId(id)) {
+		config.api = "anthropic-messages" as ProviderModelConfig["api"];
+		config.baseUrl = nativeAnthropicBaseUrl;
+		// Not the catalog's Claude compat: it describes Anthropic's own endpoint (official-endpoint
+		// behaviors, message threads Bifrost rejects). omp derives safe defaults for a third-party host;
+		// we add only the 1 h cache, which omp limits to the official endpoint by default. Bifrost
+		// forwards `cache_control.ttl`. Still opt-in: omp sends 5 min markers unless
+		// `cacheRetention: long` (or PI_CACHE_RETENTION=long) is set.
+		config.compat = { supportsLongCacheRetention: true } as ProviderModelConfig["compat"];
+		delete config.thinking;
+		if (hint?.nativeThinking) {
+			config.thinking = {
+				mode: hint.nativeThinking.mode,
+				efforts: hint.nativeThinking.efforts,
+				...(defaultEffort ? { defaultLevel: defaultEffort } : {}),
+			} as ProviderModelConfig["thinking"];
+		}
+	}
 	return config;
+}
+
+export type AnthropicRouteState =
+	| { kind: "native"; baseUrl: string }
+	| { kind: "unavailable"; reason: string }
+	| { kind: "off" }
+	| { kind: "unused" };
+
+/**
+ * Whether the gateway exposes Bifrost's Anthropic route to this key. A cheap model listing:
+ * 200 means usable; 404 usually means a proxy only forwards `/v1`; 401/403 means refused.
+ */
+export async function probeAnthropicRoute(
+	config: BifrostConfig,
+	apiKey: string | undefined,
+	options: { fetch?: typeof fetch; signal?: AbortSignal } = {},
+): Promise<AnthropicRouteState> {
+	const baseUrl = `${gatewayRoot(config.baseUrl)}/anthropic`;
+	try {
+		const headers: Record<string, string> = { ...requestHeaders(config, apiKey), "anthropic-version": "2023-06-01" };
+		// omp's Anthropic transport authenticates with x-api-key; probe the way it will call.
+		const key = realKey(apiKey) ?? config.virtualKey;
+		if (key) headers["x-api-key"] = key;
+		const response = await (options.fetch ?? fetch)(`${baseUrl}/v1/models`, {
+			headers,
+			signal: options.signal ?? AbortSignal.timeout(DISCOVERY_TIMEOUT_MS),
+		});
+		return response.ok ? { kind: "native", baseUrl } : { kind: "unavailable", reason: `HTTP ${response.status}` };
+	} catch (error) {
+		return { kind: "unavailable", reason: error instanceof Error ? error.message : String(error) };
+	}
 }
 
 function errorDetail(body: unknown): string | undefined {
@@ -347,6 +429,8 @@ export async function fetchBifrostModels(
 		signal?: AbortSignal;
 		/** Called with the ids that fell back to the default context window. */
 		onDefaultLimits?: (ids: string[]) => void;
+		/** Called with how `anthropic/claude-*` will be routed this discovery. */
+		onAnthropicRoute?: (state: AnthropicRouteState) => void;
 	} = {},
 ): Promise<ProviderModelConfig[]> {
 	const doFetch = options.fetch ?? fetch;
@@ -365,10 +449,20 @@ export async function fetchBifrostModels(
 	const data = (body as { data?: unknown } | undefined)?.data;
 	if (!Array.isArray(data)) throw new Error("Bifrost /models returned an unexpected shape (expected { data: [] })");
 
+	let route: AnthropicRouteState = { kind: "unused" };
+	if ((data as BifrostModel[]).some(m => typeof m?.id === "string" && isNativeAnthropicId(m.id))) {
+		route =
+			config.anthropicRoute === "off"
+				? { kind: "off" }
+				: await probeAnthropicRoute(config, apiKey, { fetch: doFetch, signal });
+	}
+	options.onAnthropicRoute?.(route);
+	const nativeBaseUrl = route.kind === "native" ? route.baseUrl : undefined;
+
 	const byId = new Map<string, ProviderModelConfig>();
 	const defaulted = new Set<string>();
 	for (const entry of data as BifrostModel[]) {
-		const model = toModelConfig(entry, config.baseUrl, options.catalog, id => defaulted.add(id));
+		const model = toModelConfig(entry, config.baseUrl, options.catalog, id => defaulted.add(id), nativeBaseUrl);
 		if (model && !byId.has(model.id)) byId.set(model.id, model);
 	}
 	if (defaulted.size > 0) options.onDefaultLimits?.([...defaulted].sort());
@@ -400,7 +494,7 @@ interface CatalogModelLike {
 	maxTokens?: number;
 	input?: ("text" | "image")[];
 	reasoning?: boolean;
-	thinking?: { efforts?: readonly string[] };
+	thinking?: { mode?: string; efforts?: readonly string[] };
 	cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
 }
 
@@ -441,6 +535,18 @@ export function createCatalogLookup(getBundledModel: GetBundledModel): CatalogLo
 				c && typeof c.input === "number" && typeof c.output === "number"
 					? { input: c.input, output: c.output, cacheRead: c.cacheRead ?? c.input, cacheWrite: c.cacheWrite ?? c.input }
 					: undefined,
+			// Only the mode and ladder: flags like `supportsDisplay` / `prefixBinding` assume
+			// Anthropic's own endpoint and aren't safe to promise through a gateway.
+			...(typeof found.thinking?.mode === "string" &&
+			found.thinking.mode.startsWith("anthropic") &&
+			efforts(found.thinking.efforts as string[] | undefined)
+				? {
+						nativeThinking: {
+							mode: found.thinking.mode,
+							efforts: efforts(found.thinking.efforts as string[] | undefined)!,
+						},
+					}
+				: {}),
 		};
 	};
 }
@@ -462,6 +568,21 @@ export default async function bifrostExtension(pi: ExtensionAPI): Promise<void> 
 	const catalog = await loadCatalogLookup();
 	let lastModels: ProviderModelConfig[] = [];
 	let lastStatus = "not yet discovered";
+	let lastRoute: AnthropicRouteState | undefined;
+	const describeRoute = (route: AnthropicRouteState | undefined): string => {
+		switch (route?.kind) {
+			case "native":
+				return `native Anthropic transport via ${route.baseUrl}`;
+			case "unavailable":
+				return `chat completions (Anthropic route unavailable: ${route.reason})`;
+			case "off":
+				return "chat completions (anthropicRoute: off)";
+			case "unused":
+				return "no anthropic/claude-* models listed";
+			default:
+				return "not yet discovered";
+		}
+	};
 
 	// Notices wait for the UI: writing to the terminal while omp's TUI owns it would garble
 	// the prompt. Discovery can run before session_start, so queue until then.
@@ -516,6 +637,9 @@ export default async function bifrostExtension(pi: ExtensionAPI): Promise<void> 
 		const models = await fetchBifrostModels(config, apiKey ?? process.env.BIFROST_API_KEY, {
 			catalog,
 			onDefaultLimits: warnDefaultLimits,
+			onAnthropicRoute: route => {
+				lastRoute = route;
+			},
 		});
 		lastModels = models;
 		lastStatus = `${models.length} models discovered at ${new Date().toLocaleTimeString()}`;
@@ -525,15 +649,18 @@ export default async function bifrostExtension(pi: ExtensionAPI): Promise<void> 
 	// Virtual-key budgets and rate limits for /usage and usage-aware fallback.
 	const usage = createBifrostUsageProvider(PROVIDER_ID, { resolve: resolveConfig });
 
-	const providerConfig = async (models?: ProviderModelConfig[]): Promise<ProviderConfig> => {
+	// No provider-level `baseUrl` and no static `models`: omp applies a registered provider `baseUrl`
+	// to *every* model of the provider (extensions can't scope it per api the way models.yml can),
+	// which would point native Anthropic rows at `…/v1`. Each discovered row carries its own base
+	// URL instead, and omp requires a provider `baseUrl` whenever static `models` are passed, so
+	// new catalogs are pushed by re-running discovery rather than by registering a model list.
+	const providerConfig = async (): Promise<ProviderConfig> => {
 		const config = await resolveConfig();
 		return {
 			api: API,
 			apiKey: bearerKeyConfig(config),
 			usage,
-			...(config ? { baseUrl: config.baseUrl } : {}),
 			...(config?.virtualKey ? { headers: { "x-bf-vk": config.virtualKey } } : {}),
-			...(models?.length ? { models } : {}),
 			fetchDynamicModels: discover,
 			oauth: {
 				name: "Bifrost AI Gateway",
@@ -553,16 +680,32 @@ export default async function bifrostExtension(pi: ExtensionAPI): Promise<void> 
 						await prompt({ message: "Bifrost virtual key (optional, Enter to skip)", allowEmpty: true, secret: true }),
 					);
 					callbacks.onProgress?.("Checking Bifrost and discovering models...");
-					const probe: BifrostConfig = { baseUrl: url, virtualKey, source: "file" };
+					const previous = await readStoredConfig();
+					const probe: BifrostConfig = {
+						baseUrl: url,
+						virtualKey,
+						source: "file",
+						anthropicRoute:
+							routeSetting(process.env.BIFROST_ANTHROPIC_ROUTE) ?? routeSetting(previous.anthropicRoute) ?? "auto",
+					};
 					const models = await fetchBifrostModels(probe, apiKey, {
 						catalog,
 						signal: callbacks.signal,
 						onDefaultLimits: warnDefaultLimits,
+						onAnthropicRoute: route => {
+							lastRoute = route;
+						},
 					});
-					await writeStoredConfig({ url, ...(virtualKey ? { virtualKey } : {}) });
+					await writeStoredConfig({
+						url,
+						...(virtualKey ? { virtualKey } : {}),
+						// Keep settings the user added by hand; /login only owns url and virtualKey.
+						...(previous.anthropicRoute ? { anthropicRoute: previous.anthropicRoute } : {}),
+					});
 					lastModels = models;
 					lastStatus = `${models.length} models discovered at login`;
-					pi.registerProvider(PROVIDER_ID, await providerConfig(models));
+					// Re-register with the new URL/virtual key; omp re-discovers through `discover`.
+					pi.registerProvider(PROVIDER_ID, await providerConfig());
 					callbacks.onProgress?.(`Found ${models.length} Bifrost models.`);
 					// With no API key, the virtual key doubles as the bearer (Bifrost accepts both).
 					return apiKey ?? virtualKey ?? KEYLESS_PLACEHOLDER;
@@ -589,9 +732,14 @@ export default async function bifrostExtension(pi: ExtensionAPI): Promise<void> 
 			const sub = args.trim().toLowerCase() || "status";
 			if (sub === "refresh") {
 				try {
-					const models = [...(await discover(nonEmpty(process.env.BIFROST_API_KEY) ?? (await savedKey(ctx))))];
-					pi.registerProvider(PROVIDER_ID, await providerConfig(models));
-					ctx.ui.notify(`Bifrost: ${models.length} models refreshed`, "info");
+					pi.registerProvider(PROVIDER_ID, await providerConfig());
+					await ctx.modelRegistry.refreshDiscoverableProviders([PROVIDER_ID], "online");
+					await writeCatalogVersion(CATALOG_VERSION);
+					ctx.ui.notify(
+						`Bifrost: ${lastModels.length} models refreshed. Claude route: ${describeRoute(lastRoute)}. ` +
+							"Re-select your model with /model (or restart) so this session uses the new settings.",
+						"info",
+					);
 				} catch (error) {
 					ctx.ui.notify(`Bifrost refresh failed: ${error instanceof Error ? error.message : String(error)}`, "error");
 				}
@@ -614,6 +762,7 @@ export default async function bifrostExtension(pi: ExtensionAPI): Promise<void> 
 						`API key: ${keyDesc}`,
 						`Virtual key: ${config?.virtualKey ? "set" : "none"}`,
 						`Catalog: ${lastStatus}${lastModels.length ? ` (e.g. ${lastModels.slice(0, 3).map(m => m.id).join(", ")})` : ""}`,
+						`Claude route: ${describeRoute(lastRoute)}`,
 						`omp catalog enrichment: ${catalog ? "on" : "unavailable"}`,
 					].join("\n"),
 					"info",
